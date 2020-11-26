@@ -49,6 +49,25 @@ class Group(namedtuple("Group", ["title", "id", "members", "version"])):
         return cls(title=title, id=id, members=members, version=1)
 
 
+class ContactList:
+    def __init__(self):
+        self._by_uuid = {}
+        self._by_number = {}
+
+    def get_by_uuid(self, uuid, fallback=None):
+        return self._by_uuid.get(uuid, fallback)
+
+    def get_by_number(self, uuid, fallback=None):
+        return self._by_number.get(uuid, fallback)
+
+    def add(self, contact):
+        self._by_uuid[contact.uuid] = contact
+        self._by_number[contact.number] = contact
+
+    def values(self):
+        return self._by_uuid.values()
+
+
 # ---
 
 
@@ -87,11 +106,13 @@ default_options = {
 buffers = {}
 
 callbacks = {}
-contacts = {}
+contacts = ContactList()
 groups = {}
 
 signald_hook = None
 signald_socket = None
+
+
 
 
 def prnt(text):
@@ -99,12 +120,13 @@ def prnt(text):
     weechat.prnt("", "signal\t%s" % text)
 
 
-def show_msg(number, group, message, incoming):
-    identifier = number if group is None else group
+def show_msg(contact_uuid, group, message, incoming):
+    identifier = contact_uuid if group is None else group
     buf = get_buffer(identifier, group is not None)
     name = "Me"
     if incoming:
-        name = contact_name(number)
+        contact = contacts.get_by_uuid(contact_uuid)
+        name = contact.nice_name if contact is not None else contact_uuid
     weechat.prnt(buf, "%s\t%s" % (name, message))
     if incoming:
         if group is None:
@@ -114,15 +136,6 @@ def show_msg(number, group, message, incoming):
             # group messages are treated as 'messages'
             hotness = weechat.WEECHAT_HOTLIST_MESSAGE
         weechat.buffer_set(buf, "hotlist", hotness)
-
-
-def contact_name(number):
-    if number == options["number"]:
-        return 'Me'
-    if number in contacts:
-        return contacts[number].nice_name
-    else:
-        return number
 
 
 def init_config():
@@ -238,7 +251,15 @@ def render_message(message):
         return "<sent sticker>"
     reaction = message.get('reaction')
     if reaction is not None:
-        name = contact_name(reaction['targetAuthor']['number'])
+        target_id = reaction["targetAuthor"].get("uuid")
+        name = "?????????"
+        if target_id is None:
+            prnt("targetAuthor as no uuid: {}".format(message))
+        else:
+            name = target_id
+            contact = contacts.get_by_uuid(target_id)
+            if contact is not None:
+                name = contact.nice_name
         em = reaction["emoji"]
         if emoji is not None:
             em = emoji.demojize(em)
@@ -259,7 +280,12 @@ def message_cb(payload):
         message = render_message(payload['dataMessage'])
         groupInfo = payload['dataMessage'].get('group')
         group = groupInfo.get('groupId') if groupInfo is not None else None
-        show_msg(payload['source']['number'], group, message, True)
+        sender_id = payload["source"].get("uuid")
+        if sender_id is None:
+            prnt("Sender without a uuid: {}".format(payload))
+            show_msg(payload['source']['number'], group, message, True)
+        else:
+            show_msg(sender_id, group, message, True)
     elif payload.get('syncMessage') is not None:
         # some syncMessages are to synchronize read receipts; we ignore these
         if payload['syncMessage'].get('readMessages') is not None:
@@ -275,7 +301,9 @@ def message_cb(payload):
         message = render_message(payload['syncMessage']['sent']['message'])
         groupInfo = payload['syncMessage']['sent']['message'].get('group')
         group = groupInfo.get('groupId') if groupInfo is not None else None
-        dest = payload['syncMessage']['sent']['destination']['number'] if groupInfo is None else None
+        dest = None
+        if groupInfo is None:
+            dest = payload['syncMessage']['sent']['destination'].get('uuid')
         show_msg(dest, group, message, False)
 
 
@@ -284,11 +312,9 @@ def noop_cb(payload):
 
 
 def contact_list_cb(payload):
-    global contacts
-
     for contact in payload:
         contact = Contact.parse(contact)
-        contacts[contact.number] = contact
+        contacts.add(contact)
         logger.debug("Checking for buffers with contact %s", contact)
         if contact.number in buffers:
             b = buffers[contact.number]
@@ -315,7 +341,12 @@ def setup_group_buffer(groupId):
     weechat.buffer_set(buffer, "nicklist", "1")
     weechat.buffer_set(buffer, "nicklist_display_groups", "0")
     for member in group.members:
-        member_name = contact_name(member['number'])
+        member_name = None
+        if group.version == 1:
+            contact = contacts.get_by_number(member["number"])
+            member_name = contact.nice_name if contact is not None else member["number"]
+        else:
+            raise NotImplementedError("Groups v2")
         entry = weechat.nicklist_search_nick(buffer, "", member_name)
         if len(entry) == 0:
             logger.debug("Adding %s to group %s", member_name, groupId)
@@ -332,8 +363,9 @@ def get_buffer(identifier, isGroup):
         cb = "buffer_input_group" if isGroup else "buffer_input"
         logger.debug("Creating buffer for identifier %s (%s)", identifier, "group" if isGroup else "contact")
         buffers[identifier] = weechat.buffer_new(identifier, cb, identifier, "buffer_close_cb", identifier)
-        if not isGroup and identifier in contacts:
-            name = contacts[identifier].nice_name
+        if not isGroup:
+            contact = contacts.get_by_uuid(identifier)
+            name = contact.nice_name if contact is not None else identifier
             set_buffer_name(buffers[identifier], name)
         if isGroup:
             setup_group_buffer(identifier)
@@ -347,10 +379,11 @@ def encode_message(message):
     return message
 
 
-def buffer_input(number, buffer, message):
+def buffer_input(contact_id, buffer, message):
     encoded = encode_message(message)
+    number = contacts.get_by_uuid(contact_id).number
     send("send", username=options["number"], recipientAddress={"number": number}, messageBody=encoded)
-    show_msg(number, None, message, False)
+    show_msg(contact_id, None, message, False)
     return weechat.WEECHAT_RC_OK
 
 
@@ -418,10 +451,11 @@ def smsg_cmd_cb(data, buffer, args):
     if len(args) == 0:
         prnt("Usage: /smsg [number | group]")
     else:
-        for number in contacts:
-            if number == args or contacts[number].nice_name.lower() == args.lower():
-                identifier = number
+        for contact in contacts.values():
+            if contact.number == args or contact.nice_name.lower() == args.lower():
+                identifier = contact.uuid
                 group = None
+                break
         if not identifier:
             for group in groups.values():
                 if group.title == args:
@@ -440,9 +474,10 @@ def signal_cmd_cb(data, buffer, args):
         prnt('')
     elif args == 'list contacts':
         prnt('List of all available contacts:')
-        for number in contacts:
-            if contact_name(number) != options['number']:
-                prnt('{name}, {number}\n'.format(name=contact_name(number), number=number))
+        for contact in contacts.values():
+            if contact.number != options['number']:
+                number = contact.number
+                prnt('{name}, {number}\n'.format(name=contact.nice_name, number=number))
         prnt('')
     else:
         pass
