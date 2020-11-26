@@ -6,12 +6,41 @@ import json
 import os
 import random
 
+from collections import namedtuple
+
+
 """
 For completion to work, you need to set option
 weechat.completion.default_template to include signal_contact_or_group, e.g.
 
 %{nicks}|%(irc_channels)|%(signal_contact_or_group)
 """
+
+options = {}
+
+# ---
+# XXX. All of this should be in a separate file/library.
+# ---
+
+
+class Contact(namedtuple("Contact", ["name", "uuid", "number"])):
+    @property
+    def nice_name(self):
+        if self.number == options["number"]:
+            return "Me"
+        if self.name:
+            return self.name
+        return self.number
+
+    @classmethod
+    def parse(cls, payload):
+        number = payload["address"]["number"]
+        uuid = payload["address"]["uuid"]
+        name = payload.get("name")
+        return cls(number=number, uuid=uuid, name=name)
+
+# ---
+
 
 try:
     import emoji
@@ -45,7 +74,6 @@ default_options = {
     "number": ""
 }
 
-options = {}
 buffers = {}
 
 callbacks = {}
@@ -82,9 +110,10 @@ def contact_name(number):
     if number == options["number"]:
         return 'Me'
     if number in contacts:
-        return contacts[number].get('name', number)
+        return contacts[number].nice_name
     else:
         return number
+
 
 def init_config():
     global default_options, options
@@ -248,12 +277,12 @@ def contact_list_cb(payload):
     global contacts
 
     for contact in payload:
-        contacts[contact['address']['number']] = contact
+        contact = Contact.parse(contact)
+        contacts[contact.number] = contact
         logger.debug("Checking for buffers with contact %s", contact)
-        if contact['address']['number'] in buffers:
-            b = buffers[contact['address']['number']]
-            name = contact.get('name', contact['address']['number'])
-            set_buffer_name(b, name)
+        if contact.number in buffers:
+            b = buffers[contact.number]
+            set_buffer_name(b, contact.nice_name)
 
 
 def set_buffer_name(b, name):
@@ -295,7 +324,7 @@ def get_buffer(identifier, isGroup):
         logger.debug("Creating buffer for identifier %s (%s)", identifier, "group" if isGroup else "contact")
         buffers[identifier] = weechat.buffer_new(identifier, cb, identifier, "buffer_close_cb", identifier)
         if not isGroup and identifier in contacts:
-            name = contacts[identifier].get('name', identifier)
+            name = contacts[identifier].nice_name
             set_buffer_name(buffers[identifier], name)
         if isGroup:
             setup_group_buffer(identifier)
@@ -381,7 +410,7 @@ def smsg_cmd_cb(data, buffer, args):
         prnt("Usage: /smsg [number | group]")
     else:
         for number in contacts:
-            if number == args or contacts[number].get('name', number).lower() == args.lower():
+            if number == args or contacts[number].nice_name.lower() == args.lower():
                 identifier = number
                 group = None
         if not identifier:
@@ -406,24 +435,27 @@ def signal_cmd_cb(data, buffer, args):
             if contact_name(number) != options['number']:
                 prnt('{name}, {number}\n'.format(name=contact_name(number), number=number))
         prnt('')
-    else: pass
+    else:
+        pass
 
     return weechat.WEECHAT_RC_OK
 
 def completion_cb(data, completion_item, buffer, completion):
     if weechat.info_get('version', '') <= '2.8':
-        for number in contacts:
-            weechat.hook_completion_list_add(completion, number, 0, weechat.WEECHAT_LIST_POS_SORT)
-            weechat.hook_completion_list_add(completion, contact_name(number).lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
-            weechat.hook_completion_list_add(completion, contact_name(number), 0, weechat.WEECHAT_LIST_POS_SORT)
+        for contact in contacts.values():
+            weechat.hook_completion_list_add(completion, contact.number, 0, weechat.WEECHAT_LIST_POS_SORT)
+            if contact.name:
+                weechat.hook_completion_list_add(completion, contact.name.lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
+                weechat.hook_completion_list_add(completion, contact.name, 0, weechat.WEECHAT_LIST_POS_SORT)
         for group in groups:
             weechat.hook_completion_list_add(completion, groups[group]['name'].lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
             weechat.hook_completion_list_add(completion, groups[group]['name'], 0, weechat.WEECHAT_LIST_POS_SORT)
     else:
-        for number in contacts:
-            weechat.completion_list_add(completion, number, 0, weechat.WEECHAT_LIST_POS_SORT)
-            weechat.completion_list_add(completion, contact_name(number).lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
-            weechat.completion_list_add(completion, contact_name(number), 0, weechat.WEECHAT_LIST_POS_SORT)
+        for contact in contacts.values():
+            weechat.completion_list_add(completion, contact.number, 0, weechat.WEECHAT_LIST_POS_SORT)
+            if contact.name:
+                weechat.completion_list_add(completion, contact.name.lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
+                weechat.completion_list_add(completion, contact.name, 0, weechat.WEECHAT_LIST_POS_SORT)
         for group in groups:
             weechat.completion_list_add(completion, groups[group]['name'].lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
             weechat.completion_list_add(completion, groups[group]['name'], 0, weechat.WEECHAT_LIST_POS_SORT)
