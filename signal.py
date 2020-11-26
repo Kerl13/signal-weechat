@@ -40,13 +40,13 @@ class Contact(namedtuple("Contact", ["name", "uuid", "number"])):
         return cls(number=number, uuid=uuid, name=name)
 
 
-class Group(namedtuple("Group", ["title", "id", "members"])):
+class Group(namedtuple("Group", ["title", "id", "members", "version"])):
     @classmethod
     def parse_v1(cls, payload):
         title = payload["name"]
         id = payload["groupId"]
         members = payload["members"]  # XXX. this is left "unparsed"
-        return cls(title=title, id=id, members=members)
+        return cls(title=title, id=id, members=members, version=1)
 
 
 # ---
