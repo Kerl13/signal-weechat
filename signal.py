@@ -48,6 +48,13 @@ class Group(namedtuple("Group", ["title", "id", "members", "version"])):
         members = payload["members"]  # XXX. this is left "unparsed"
         return cls(title=title, id=id, members=members, version=1)
 
+    @classmethod
+    def parse_v2(cls, payload):
+        title = payload["title"]
+        id = payload["id"]
+        members = payload["members"]
+        return cls(title=title, id=id, members=members, version=2)
+
 
 class ContactList:
     def __init__(self):
@@ -113,23 +120,21 @@ signald_hook = None
 signald_socket = None
 
 
-
-
 def prnt(text):
     logger.info(text)
     weechat.prnt("", "signal\t%s" % text)
 
 
-def show_msg(contact_uuid, group, message, incoming):
-    identifier = contact_uuid if group is None else group
-    buf = get_buffer(identifier, group is not None)
+def show_msg(contact_uuid, group_id, message, incoming):
+    identifier = contact_uuid if group_id is None else group_id
+    buf = get_buffer(identifier, group_id is not None)
     name = "Me"
     if incoming:
         contact = contacts.get_by_uuid(contact_uuid)
         name = contact.nice_name if contact is not None else contact_uuid
     weechat.prnt(buf, "%s\t%s" % (name, message))
     if incoming:
-        if group is None:
+        if group_id is None:
             # 1:1 messages are private messages
             hotness = weechat.WEECHAT_HOTLIST_PRIVATE
         else:
@@ -278,14 +283,18 @@ def render_message(message):
 def message_cb(payload):
     if payload.get('dataMessage') is not None:
         message = render_message(payload['dataMessage'])
-        groupInfo = payload['dataMessage'].get('group')
-        group = groupInfo.get('groupId') if groupInfo is not None else None
+        msg_payload = payload["dataMessage"]
+        group_id = None
+        if "group" in msg_payload:
+            group_id = msg_payload["group"]["groupId"]
+        elif "groupV2" in msg_payload:
+            group_id = msg_payload["groupV2"]["id"]
         sender_id = payload["source"].get("uuid")
         if sender_id is None:
             prnt("Sender without a uuid: {}".format(payload))
-            show_msg(payload['source']['number'], group, message, True)
+            show_msg(payload['source']['number'], group_id, message, True)
         else:
-            show_msg(sender_id, group, message, True)
+            show_msg(sender_id, group_id, message, True)
     elif payload.get('syncMessage') is not None:
         # some syncMessages are to synchronize read receipts; we ignore these
         if payload['syncMessage'].get('readMessages') is not None:
@@ -298,13 +307,17 @@ def message_cb(payload):
             send("list_contacts", username=options['number'])
             return
 
-        message = render_message(payload['syncMessage']['sent']['message'])
-        groupInfo = payload['syncMessage']['sent']['message'].get('group')
-        group = groupInfo.get('groupId') if groupInfo is not None else None
+        msg_payload = payload['syncMessage']['sent']['message']
+        message = render_message(msg_payload)
+        group_id = None
         dest = None
-        if groupInfo is None:
+        if "group" in msg_payload:
+            group_id = msg_payload["group"]["groupId"]
+        elif "groupV2" in msg_payload:
+            group_id = msg_payload["groupV2"]["id"]
+        if group_id is None:
             dest = payload['syncMessage']['sent']['destination'].get('uuid')
-        show_msg(dest, group, message, False)
+        show_msg(dest, group_id, message, False)
 
 
 def noop_cb(payload):
@@ -332,6 +345,9 @@ def group_list_cb(payload):
     for group in payload['groups']:
         group = Group.parse_v1(group)
         groups[group.id] = group
+    for group in payload["groupsv2"]:
+        group = Group.parse_v2(group)
+        groups[group.id] = group
 
 
 def setup_group_buffer(groupId):
@@ -346,7 +362,9 @@ def setup_group_buffer(groupId):
             contact = contacts.get_by_number(member["number"])
             member_name = contact.nice_name if contact is not None else member["number"]
         else:
-            raise NotImplementedError("Groups v2")
+            assert group.version == 2
+            contact = contacts.get_by_uuid(member["uuid"])
+            member_name = contact.nice_name if contact is not None else member["uuid"]
         entry = weechat.nicklist_search_nick(buffer, "", member_name)
         if len(entry) == 0:
             logger.debug("Adding %s to group %s", member_name, groupId)
