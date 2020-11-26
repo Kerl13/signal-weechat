@@ -39,6 +39,16 @@ class Contact(namedtuple("Contact", ["name", "uuid", "number"])):
         name = payload.get("name")
         return cls(number=number, uuid=uuid, name=name)
 
+
+class Group(namedtuple("Group", ["title", "id", "members"])):
+    @classmethod
+    def parse_v1(cls, payload):
+        title = payload["name"]
+        id = payload["groupId"]
+        members = payload["members"]  # XXX. this is left "unparsed"
+        return cls(title=title, id=id, members=members)
+
+
 # ---
 
 
@@ -293,19 +303,18 @@ def set_buffer_name(b, name):
 
 
 def group_list_cb(payload):
-    global groups
     for group in payload['groups']:
-        groups[group['groupId']] = group
+        group = Group.parse_v1(group)
+        groups[group.id] = group
 
 
 def setup_group_buffer(groupId):
-    global groups
     group = groups[groupId]
     buffer = get_buffer(groupId, True)
-    set_buffer_name(buffer, group['name'])
+    set_buffer_name(buffer, group.title)
     weechat.buffer_set(buffer, "nicklist", "1")
     weechat.buffer_set(buffer, "nicklist_display_groups", "0")
-    for member in group['members']:
+    for member in group.members:
         member_name = contact_name(member['number'])
         entry = weechat.nicklist_search_nick(buffer, "", member_name)
         if len(entry) == 0:
@@ -414,9 +423,9 @@ def smsg_cmd_cb(data, buffer, args):
                 identifier = number
                 group = None
         if not identifier:
-            for group in groups:
-                if groups[group]['name'] == args:
-                    identifier = group
+            for group in groups.values():
+                if group.title == args:
+                    identifier = group.id
         if identifier:
             buf = get_buffer(identifier, group is not None)
 
@@ -426,8 +435,8 @@ def smsg_cmd_cb(data, buffer, args):
 def signal_cmd_cb(data, buffer, args):
     if args == 'list groups':
         prnt('List of all available Signal groups:')
-        for group in groups:
-            prnt(groups[group]['name'])
+        for group in groups.values():
+            prnt(group.title)
         prnt('')
     elif args == 'list contacts':
         prnt('List of all available contacts:')
@@ -447,18 +456,18 @@ def completion_cb(data, completion_item, buffer, completion):
             if contact.name:
                 weechat.hook_completion_list_add(completion, contact.name.lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
                 weechat.hook_completion_list_add(completion, contact.name, 0, weechat.WEECHAT_LIST_POS_SORT)
-        for group in groups:
-            weechat.hook_completion_list_add(completion, groups[group]['name'].lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
-            weechat.hook_completion_list_add(completion, groups[group]['name'], 0, weechat.WEECHAT_LIST_POS_SORT)
+        for group in groups.values():
+            weechat.hook_completion_list_add(completion, group.title.lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
+            weechat.hook_completion_list_add(completion, group.title, 0, weechat.WEECHAT_LIST_POS_SORT)
     else:
         for contact in contacts.values():
             weechat.completion_list_add(completion, contact.number, 0, weechat.WEECHAT_LIST_POS_SORT)
             if contact.name:
                 weechat.completion_list_add(completion, contact.name.lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
                 weechat.completion_list_add(completion, contact.name, 0, weechat.WEECHAT_LIST_POS_SORT)
-        for group in groups:
-            weechat.completion_list_add(completion, groups[group]['name'].lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
-            weechat.completion_list_add(completion, groups[group]['name'], 0, weechat.WEECHAT_LIST_POS_SORT)
+        for group in groups.values():
+            weechat.completion_list_add(completion, group.title.lower(), 0, weechat.WEECHAT_LIST_POS_SORT)
+            weechat.completion_list_add(completion, group.title, 0, weechat.WEECHAT_LIST_POS_SORT)
 
     return weechat.WEECHAT_RC_OK
 
